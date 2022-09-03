@@ -10,6 +10,7 @@ ext {
     // by replacing $PREFIX since app code is dependant on the variant used to build the APK.
     // Currently supported values are: [ "apt-android-7" "apt-android-5" ]
     packageVariant = System.getenv("TERMUX_PACKAGE_VARIANT") ?: "apt-android-7" // Default: "apt-android-7"
+    noBootstrap = System.getenv("TERMUX_NO_BOOTSTRAP") ?: "0"
 }
 
 android {
@@ -82,6 +83,12 @@ android {
             storePassword 'xrj45yWGLbsO7W0v'
             keyPassword 'xrj45yWGLbsO7W0v'
         }
+        release {
+                storeFile file('/home/matan/.android/my-release-key.keystore')
+                storePassword 'asekrygfciwuev'
+                keyAlias 'key'
+                keyPassword 'asekrygfciwuev'
+        }
     }
 
     buildTypes {
@@ -89,6 +96,7 @@ android {
             minifyEnabled true
             shrinkResources false // Reproducible builds
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+            signingConfig signingConfigs.release
         }
 
         debug {
@@ -213,6 +221,7 @@ clean {
 task downloadBootstraps() {
     doLast {
         def packageVariant = project.ext.packageVariant
+        if (project.ext.noBootstrap != "1") {
         if (packageVariant == "apt-android-7") {
             def version = "2022.04.28-r5" + "+" + packageVariant
             downloadBootstrap("aarch64", "4a51a7eb209fe82efc24d52e3cccc13165f27377290687cb82038cbd8e948430", version)
@@ -227,6 +236,7 @@ task downloadBootstraps() {
             downloadBootstrap("x86_64", "615b590679ee6cd885b7fd2ff9473c845e920f9b422f790bb158c63fe42b8481", version)
         } else {
             throw new GradleException("Unsupported TERMUX_PACKAGE_VARIANT \"" + packageVariant + "\"")
+        }
         }
     }
 }
