@@ -237,7 +237,13 @@ task downloadBootstraps() {
         } else {
             throw new GradleException("Unsupported TERMUX_PACKAGE_VARIANT \"" + packageVariant + "\"")
         }
+        } else {
+            new File("app/src/main/cpp/", "bootstrap-" + "aarch64" + ".zip").text = ""
+            new File("app/src/main/cpp/", "bootstrap-" + "arm" + ".zip").text = ""
+            new File("app/src/main/cpp/", "bootstrap-" + "i686" + ".zip").text = ""
+            new File("app/src/main/cpp/", "bootstrap-" + "x86_64" + ".zip").text = ""
         }
+
     }
 }
 
