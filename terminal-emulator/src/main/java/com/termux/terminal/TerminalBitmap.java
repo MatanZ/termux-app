@@ -139,7 +139,7 @@ public class TerminalBitmap {
                 s++;
             }
             for (int j=0; j<w ; j++) {
-                screen.setChar(X+j, Y+i-s, '+', TextStyle.encodeBitmap(num, j, i));
+                screen.setChar(X+j, Y+i-s, 'A', TextStyle.encodeBitmap(num, j, i));
             }
         }
         if (w * cellW < width) {
