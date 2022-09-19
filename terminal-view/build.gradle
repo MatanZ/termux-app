@@ -7,6 +7,8 @@ android {
     dependencies {
         implementation "androidx.annotation:annotation:1.3.0"
         api project(":terminal-emulator")
+        implementation "com.ibm.icu:icu4j:53.1"
+
     }
 
     defaultConfig {

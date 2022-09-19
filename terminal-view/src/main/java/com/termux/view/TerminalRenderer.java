@@ -14,6 +14,11 @@ import com.termux.terminal.TerminalRow;
 import com.termux.terminal.TextStyle;
 import com.termux.terminal.WcWidth;
 
+import com.ibm.icu.text.ArabicShaping;
+import com.ibm.icu.text.ArabicShapingException;
+import com.ibm.icu.text.Bidi;
+import com.ibm.icu.text.BidiRun;
+
 /**
  * Renderer of a {@link TerminalEmulator} into a {@link Canvas}.
  * <p/>
@@ -85,8 +90,28 @@ public final class TerminalRenderer {
             }
 
             TerminalRow lineObject = screen.allocateFullLineIfNecessary(screen.externalToInternalRow(row));
-            final char[] line = lineObject.mText;
             final int charsUsedInLine = lineObject.getSpaceUsed();
+            char[] line;
+
+            String tempLine = new String(lineObject.mText);
+            ArabicShaping as = new ArabicShaping(ArabicShaping.LETTERS_SHAPE | ArabicShaping.LENGTH_GROW_SHRINK);
+            try {
+                tempLine = as.shape(tempLine);
+            } catch (ArabicShapingException e) {
+            }
+            try {
+                Bidi bidi = new Bidi();
+                bidi.setPara(tempLine, Bidi.LTR, null);
+                int[] logicalMap = bidi.getLogicalMap();
+                int[] visualMap = bidi.getVisualMap();
+                line = new char[charsUsedInLine];
+                for (int i=0; i < charsUsedInLine; i++) {
+                    line[i] = tempLine.charAt(visualMap[i]);
+                }
+            } catch (Exception e) {
+                // no use for shaping if we cannot reorder
+                line = lineObject.mText;
+            }
 
             long lastRunStyle = 0;
             boolean lastRunInsideCursor = false;
