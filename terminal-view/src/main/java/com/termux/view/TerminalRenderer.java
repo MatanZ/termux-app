@@ -82,7 +82,7 @@ public final class TerminalRenderer {
         for (int row = topRow; row < endRow; row++) {
             heightOffset += mFontLineSpacing;
 
-            final int cursorX = (row == cursorRow && cursorVisible) ? cursorCol : -1;
+            int cursorX = (row == cursorRow && cursorVisible) ? cursorCol : -1;
             int selx1 = -1, selx2 = -1;
             if (row >= selectionY1 && row <= selectionY2) {
                 if (row == selectionY1) selx1 = selectionX1;
@@ -92,6 +92,7 @@ public final class TerminalRenderer {
             TerminalRow lineObject = screen.allocateFullLineIfNecessary(screen.externalToInternalRow(row));
             final int charsUsedInLine = lineObject.getSpaceUsed();
             char[] line;
+            int[] visualMap = null;
 
             String tempLine = new String(lineObject.mText);
             ArabicShaping as = new ArabicShaping(ArabicShaping.LETTERS_SHAPE | ArabicShaping.LENGTH_GROW_SHRINK);
@@ -103,10 +104,13 @@ public final class TerminalRenderer {
                 Bidi bidi = new Bidi();
                 bidi.setPara(tempLine, Bidi.LTR, null);
                 int[] logicalMap = bidi.getLogicalMap();
-                int[] visualMap = bidi.getVisualMap();
+                visualMap = bidi.getVisualMap();
                 line = new char[charsUsedInLine];
                 for (int i=0; i < charsUsedInLine; i++) {
                     line[i] = tempLine.charAt(visualMap[i]);
+                }
+                if (cursorX != -1) {
+                    cursorX = logicalMap[cursorX];
                 }
             } catch (Exception e) {
                 // no use for shaping if we cannot reorder
@@ -127,7 +131,7 @@ public final class TerminalRenderer {
                 final boolean charIsHighsurrogate = Character.isHighSurrogate(charAtIndex);
                 final int charsForCodePoint = charIsHighsurrogate ? 2 : 1;
                 final int codePoint = charIsHighsurrogate ? Character.toCodePoint(charAtIndex, line[currentCharIndex + 1]) : charAtIndex;
-                final long style = lineObject.getStyle(column);
+                final long style = lineObject.getStyle(visualMap == null ? column : visualMap[column]);
                 if (TextStyle.isBitmap(style)) {
                     Bitmap bm = mEmulator.getScreen().getSixelBitmap(codePoint, style);
                     if (bm != null) {
