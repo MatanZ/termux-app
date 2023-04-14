@@ -1,7 +1,12 @@
 package com.termux.terminal;
 
+import android.media.MediaPlayer;
 import android.util.Base64;
 
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -2288,6 +2293,7 @@ public final class TerminalEmulator {
                 if (textParameter.startsWith("File=")) {
                     int pos = 5;
                     boolean inline = false;
+                    boolean inlineMedia = false;
                     boolean aspect = true;
                     int width = -1;
                     int height = -1;
@@ -2305,6 +2311,9 @@ public final class TerminalEmulator {
                         pos = semicolonpos + 1;
                         if (k.equalsIgnoreCase("inline")) {
                             inline = v.equals("1");
+                        }
+                        if (k.equalsIgnoreCase("inlineMedia")) {
+                            inlineMedia = v.equals("1");
                         }
                         if (k.equalsIgnoreCase("preserveAspectRatio")) {
                             aspect = ! v.equals("0");
@@ -2342,7 +2351,7 @@ public final class TerminalEmulator {
                             }
                         }
                     }
-                    if (!inline) {
+                    if (!inline && !inlineMedia) {
                         finishSequence();
                         return;
                     }
@@ -2365,17 +2374,38 @@ public final class TerminalEmulator {
                         for(int i = 0; i < ESC_OSC_data.size(); i++) {
                             result[i] = ESC_OSC_data.get(i).byteValue();
                         }
-                        int[] res = mScreen.addImage(result, mCursorRow, mCursorCol, cellW, cellH, width, height, aspect);
-                        int col = res[1] + mCursorCol;
-                        if (col < mColumns -1) {
-                            res[0] -= 1;
+                        if (inlineMedia) {
+                            try {
+                                File Mytemp = File.createTempFile("TCL", "mp3");
+                                Mytemp.deleteOnExit();
+                                FileOutputStream fos = new FileOutputStream(Mytemp);
+                                fos.write(result);
+                                fos.close();
+
+                                MediaPlayer mediaPlayer = new MediaPlayer();
+
+                                FileInputStream MyFile = new FileInputStream(Mytemp);
+                                mediaPlayer.setDataSource(MyFile.getFD());
+
+                                mediaPlayer.prepare();
+                                mediaPlayer.start();
+                            } catch (IOException ex) {
+                                String s = ex.toString();
+                                ex.printStackTrace();
+                            }
                         } else {
-                            col = 0;
+                            int[] res = mScreen.addImage(result, mCursorRow, mCursorCol, cellW, cellH, width, height, aspect);
+                            int col = res[1] + mCursorCol;
+                            if (col < mColumns -1) {
+                                res[0] -= 1;
+                            } else {
+                                col = 0;
+                            }
+                            for(;res[0] > 0; res[0]--) {
+                                doLinefeed();
+                            }
+                            mCursorCol = col;
                         }
-                        for(;res[0] > 0; res[0]--) {
-                            doLinefeed();
-                        }
-                        mCursorCol = col;
                         ESC_OSC_data.clear();
                     } else {
                     }
