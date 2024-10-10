@@ -88,7 +88,7 @@ public final class TerminalEmulator {
     /** Escape processing: "ESC _" or Application Program Command (APC). */
     private static final int ESC_APC = 20;
     /** Escape processing: "ESC _" or Application Program Command (APC), followed by Escape. */
-    private static final int ESC_APC_ESCAPE = 21;
+    private static final int ESC_APC_ESC = 21;
 
     /** The number of parameter arguments including colon separated sub-parameters. */
     private static final int MAX_ESCAPE_PARAMETERS = 32;
@@ -586,8 +586,8 @@ public final class TerminalEmulator {
         if (mEscapeState == ESC_APC) {
             doApc(b);
             return;
-        } else if (mEscapeState == ESC_APC_ESCAPE) {
-            doApcEscape(b);
+        } else if (mEscapeState == ESC_APC_ESC) {
+            doApcEsc(b);
             return;
         }
 
@@ -1164,30 +1164,6 @@ public final class TerminalEmulator {
                     continueSequence(mEscapeState);
                 }
             }
-    }
-
-    /**
-     * When in {@link #ESC_APC} (APC, Application Program Command) sequence.
-     */
-    private void doApc(int b) {
-        if (b == 27) {
-            continueSequence(ESC_APC_ESCAPE);
-        }
-        // Eat APC sequences silently for now.
-    }
-
-    /**
-     * When in {@link #ESC_APC} (APC, Application Program Command) sequence.
-     */
-    private void doApcEscape(int b) {
-        if (b == '\\') {
-            // A String Terminator (ST), ending the APC escape sequence.
-            finishSequence();
-        } else {
-            // The Escape character was not the start of a String Terminator (ST),
-            // but instead just data inside of the APC escape sequence.
-            continueSequence(ESC_APC);
-        }
     }
 
     private int nextTabStop(int numTabs) {
