@@ -10,7 +10,9 @@ import android.graphics.Rect;
 import android.graphics.RectF;
 import android.os.Build;
 
+import java.util.HashSet;
 import java.util.Properties;
+import java.util.Set;
 
 /**
  * A terminal bitmap for images.
@@ -138,6 +140,25 @@ public class TerminalBitmap {
 
     protected int[] mCursorDelta;
 
+    /**
+     * Whether this bitmap is a placement of a kitty graphics image, in which case
+     * {@link #mKittyImageId} and {@link #mKittyPlacementId} define which placement it is of which
+     * image, although both may be unset if the client did not pass the `i` and `p` keys.
+     *
+     * The association is stored in the {@link TerminalBitmap} itself instead of a separate registry
+     * so that it does not need to be kept in sync when bitmaps are removed by
+     * {@link TerminalBuffer#doTerminalBitmapsGC(int)} and
+     * {@link TerminalBuffer#removeScrolledOutTerminalBitmaps(int)}, since bitmap numbers are reused
+     * for new bitmaps.
+     */
+    protected boolean mIsKittyImage;
+
+    /** The kitty graphics image id this bitmap is a placement of, if {@link #mIsKittyImage}. */
+    protected long mKittyImageId = KittyImage.IMAGE_ID__NONE;
+
+    /** The kitty graphics placement id of this bitmap, if {@link #mIsKittyImage}. */
+    protected long mKittyPlacementId = KittyImage.PLACEMENT_ID__NONE;
+
 
     protected TerminalBitmap(TerminalSessionClient client, int bitmapNum, Bitmap bitmap,
                              int cellWidth, int cellHeight,
@@ -215,26 +236,20 @@ public class TerminalBitmap {
 
                 imageHeight = options.outHeight;
                 imageWidth = options.outWidth;
-                if (shouldPreserveAspectRatio) {
-                    double wFactor = 9999.0;
-                    double hFactor = 9999.0;
-                    if (width > 0) {
-                        wFactor = (double) width / imageWidth;
-                    }
-                    if (height > 0) {
-                        hFactor = (double) height / imageHeight;
-                    }
-                    double factor = Math.min(wFactor, hFactor);
-                    newWidth = (int) (factor * imageWidth);
-                    newHeight = (int) (factor * imageHeight);
-                } else {
-                    if (height <= 0) {
-                        newHeight = imageHeight;
-                    }
-                    if (width <= 0) {
-                        newWidth = imageWidth;
-                    }
+                if (imageWidth < 1 || imageHeight < 1) {
+                    // The image dimensions are not known if the image data could not be decoded.
+                    // Bailing out early is required since a `0` dimension would otherwise result in
+                    // a division by `0` while calculating the factors below and in the `scaleFactor`
+                    // loop below never terminating.
+                    Logger.logError(terminalBuffer.getClient(), LOG_TAG,
+                        "Create terminal bitmap " + bitmapNum + " from image byte array failed:" +
+                            " Decoded bitmap bounds " + imageWidth + "x" + imageHeight + " are not valid");
+                    return null;
                 }
+
+                int[] newSize = getScaledImageSize(imageWidth, imageHeight, width, height, shouldPreserveAspectRatio);
+                newWidth = newSize[0];
+                newHeight = newSize[1];
 
                 int scaleFactor = 1;
                 while (imageHeight >= 2 * newHeight * scaleFactor && imageWidth >= 2 * newWidth * scaleFactor) {
@@ -337,6 +352,319 @@ public class TerminalBitmap {
     }
 
 
+    /**
+     * Build a {@link TerminalBitmap} for a placement of a kitty graphics image.
+     *
+     * The kitty graphics protocol has its own image formats and allows a source rectangle of the
+     * image to be displayed instead of the entire image, so
+     * {@link #build(TerminalBuffer, int, byte[], int, int, int, int, int, int, boolean)} used for
+     * iTerm images cannot be used. The source rectangle must be cropped before the image is scaled
+     * to the cells it is to be displayed in, otherwise the wrong part of the image would be scaled.
+     *
+     * Note that unlike the iTerm image path, a `PNG` is decoded at its full size instead of being
+     * subsampled while decoding, since the source rectangle coordinates are in the coordinate space
+     * of the full size image. The size of the bitmap that would be created is checked against
+     * {@link #MAX_BITMAP_SIZE} before decoding instead.
+     *
+     * @param format The kitty graphics image format, check {@link KittyImage#FORMAT__PNG} and
+     *               {@link KittyImage#isRawFormat()} for more info.
+     * @param image The image data, which is the raw pixel data for the raw formats, in which case
+     *              its length must be `pixelWidth * pixelHeight * <bytes per pixel>`.
+     * @param pixelWidth The width in pixels of the image data, required for the raw formats.
+     * @param pixelHeight The height in pixels of the image data, required for the raw formats.
+     * @param sourceX The x coordinate in pixels of the source rectangle of the image to display.
+     * @param sourceY The y coordinate in pixels of the source rectangle of the image to display.
+     * @param sourceWidth The width in pixels of the source rectangle, or a value `< 1` for the rest
+     *                    of the image after `sourceX`.
+     * @param sourceHeight The height in pixels of the source rectangle, or a value `< 1` for the
+     *                     rest of the image after `sourceY`.
+     */
+    public static TerminalBitmap buildForKittyImage(TerminalBuffer terminalBuffer, int bitmapNum,
+                                                    int format, byte[] image,
+                                                    int pixelWidth, int pixelHeight,
+                                                    int sourceX, int sourceY,
+                                                    int sourceWidth, int sourceHeight,
+                                                    int x, int y, int cellWidth, int cellHeight,
+                                                    int width, int height, boolean shouldPreserveAspectRatio) {
+        try {
+            if (image == null) {
+                Logger.logError(terminalBuffer.getClient(), LOG_TAG,
+                    "Create terminal bitmap " + bitmapNum + " for kitty image failed: Image data not set");
+                return null;
+            }
+
+            // A `PNG` can only be subsampled while decoding it if the entire image is displayed,
+            // since the source rectangle coordinates are in the coordinate space of the full size
+            // image, so subsampling would crop the wrong region of a smaller image.
+            boolean hasSourceRectangle = sourceX > 0 || sourceY > 0 || sourceWidth > 0 || sourceHeight > 0;
+
+            Bitmap newBitmap;
+            if (format == KittyImage.FORMAT__PNG) {
+                newBitmap = createBitmapFromPng(terminalBuffer.getClient(), bitmapNum, image,
+                    !hasSourceRectangle, width, height, shouldPreserveAspectRatio);
+            } else {
+                newBitmap = createBitmapFromRawPixels(terminalBuffer.getClient(), bitmapNum, image,
+                    KittyImage.getBytesPerPixel(format), pixelWidth, pixelHeight);
+            }
+
+            if (newBitmap == null) {
+                Logger.logError(terminalBuffer.getClient(), LOG_TAG,
+                    "Create terminal bitmap " + bitmapNum + " for kitty image failed: New bitmap not set");
+                return null;
+            }
+
+            newBitmap = cropBitmapToSourceRectangle(terminalBuffer.getClient(), bitmapNum, newBitmap,
+                sourceX, sourceY, sourceWidth, sourceHeight);
+            if (newBitmap == null) {
+                return null;
+            }
+
+            int bitmapWidth = newBitmap.getWidth();
+            int bitmapHeight = newBitmap.getHeight();
+            if (bitmapWidth < 1 || bitmapHeight < 1) {
+                Logger.logError(terminalBuffer.getClient(), LOG_TAG,
+                    "Create terminal bitmap " + bitmapNum + " for kitty image failed:" +
+                        " The bitmap dimensions " + bitmapWidth + "x" + bitmapHeight + " are not valid");
+                return null;
+            }
+
+            if (height > 0 || width > 0) {
+                int[] newSize = getScaledImageSize(bitmapWidth, bitmapHeight, width, height, shouldPreserveAspectRatio);
+                if (newSize[0] < 1 || newSize[1] < 1) {
+                    Logger.logError(terminalBuffer.getClient(), LOG_TAG,
+                        "Create terminal bitmap " + bitmapNum + " for kitty image failed:" +
+                            " The scaled size " + newSize[0] + "x" + newSize[1] + " is not valid");
+                    return null;
+                }
+
+                if (newSize[0] != bitmapWidth || newSize[1] != bitmapHeight) {
+                    try {
+                        newBitmap = Bitmap.createScaledBitmap(newBitmap, newSize[0], newSize[1], true);
+                    } catch (Throwable t) {
+                        if (t instanceof OutOfMemoryError) System.gc();
+                        Logger.logError(terminalBuffer.getClient(), LOG_TAG,
+                            "Create terminal bitmap " + bitmapNum + " for kitty image failed:" +
+                                " Create scaled bitmap failed: " + t.getMessage());
+                        return null;
+                    }
+
+                    if (newBitmap == null) {
+                        Logger.logError(terminalBuffer.getClient(), LOG_TAG,
+                            "Create terminal bitmap " + bitmapNum + " for kitty image failed: Scaled bitmap not set");
+                        return null;
+                    }
+                }
+            }
+
+            newBitmap = resizeBitmapConstrained(LOG_TAG, "kitty image", terminalBuffer.getClient(), newBitmap,
+                newBitmap.getWidth(), newBitmap.getHeight(), cellWidth, cellHeight,
+                terminalBuffer.mColumns - x);
+            TerminalBitmap terminalBitmap = build(terminalBuffer, bitmapNum, newBitmap, x, y, cellWidth, cellHeight);
+            if (terminalBitmap == null) {
+                return terminalBitmap;
+            }
+
+            terminalBitmap.setCursorDelta(new int[] {
+                terminalBitmap.getScrollLines(),
+                (terminalBitmap.getBitmap().getWidth() + cellWidth - 1) / cellWidth});
+
+            return terminalBitmap;
+        } catch (Throwable t) {
+            if (t instanceof OutOfMemoryError) System.gc();
+            Logger.logError(terminalBuffer.getClient(), LOG_TAG,
+                "Create terminal bitmap " + bitmapNum + " for kitty image failed: " + t.getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * Create a {@link Bitmap} from `PNG` image data of a kitty graphics image.
+     *
+     * @param canSubsample Whether the image may be subsampled while decoding it to save memory,
+     *                     which requires the entire image to be displayed, check
+     *                     {@link #buildForKittyImage(TerminalBuffer, int, int, byte[], int, int, int, int, int, int, int, int, int, int, int, int, boolean)}
+     *                     for more info.
+     * @param width The width in pixels the image is to be displayed in, or a value `< 1` if it is to
+     *              be displayed at its own size, in which case it cannot be subsampled.
+     * @param height The height in pixels the image is to be displayed in, or a value `< 1` if it is
+     *               to be displayed at its own size, in which case it cannot be subsampled.
+     */
+    private static Bitmap createBitmapFromPng(TerminalSessionClient client, int bitmapNum, byte[] image,
+                                              boolean canSubsample, int width, int height,
+                                              boolean shouldPreserveAspectRatio) {
+        try {
+            // Get image dimensions without creating a bitmap so that an image that is too large to
+            // be drawn is not decoded at all.
+            BitmapFactory.Options options = new BitmapFactory.Options();
+            options.inJustDecodeBounds = true;
+            BitmapFactory.decodeByteArray(image, 0, image.length, options);
+
+            int imageWidth = options.outWidth;
+            int imageHeight = options.outHeight;
+
+            if (imageWidth > 0 && imageHeight > 0) {
+                if (!isBitmapSizeValid(client, bitmapNum, imageWidth, imageHeight)) {
+                    return null;
+                }
+
+                if (canSubsample && (width > 0 || height > 0)) {
+                    int[] newSize = getScaledImageSize(imageWidth, imageHeight, width, height, shouldPreserveAspectRatio);
+                    if (newSize[0] > 0 && newSize[1] > 0) {
+                        int scaleFactor = 1;
+                        while (imageHeight >= 2 * newSize[1] * scaleFactor && imageWidth >= 2 * newSize[0] * scaleFactor) {
+                            scaleFactor = scaleFactor * 2;
+                        }
+
+                        if (scaleFactor > 1) {
+                            // Subsample the original image to get a smaller image to save memory.
+                            BitmapFactory.Options scaleOptions = new BitmapFactory.Options();
+                            scaleOptions.inSampleSize = scaleFactor;
+                            return BitmapFactory.decodeByteArray(image, 0, image.length, scaleOptions);
+                        }
+                    }
+                }
+            }
+
+            return BitmapFactory.decodeByteArray(image, 0, image.length);
+        } catch (Throwable t) {
+            if (t instanceof OutOfMemoryError) System.gc();
+            Logger.logError(client, LOG_TAG, "Create bitmap for" +
+                " terminal bitmap " + bitmapNum + " from png image data failed: " + t.getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * Crop a {@link Bitmap} to the source rectangle of a kitty graphics placement.
+     *
+     * @return Returns the cropped bitmap, the original bitmap if the source rectangle covers the
+     * entire bitmap, or `null` if the source rectangle is not within the bounds of the bitmap.
+     */
+    private static Bitmap cropBitmapToSourceRectangle(TerminalSessionClient client, int bitmapNum, Bitmap bitmap,
+                                                      int sourceX, int sourceY, int sourceWidth, int sourceHeight) {
+        int bitmapWidth = bitmap.getWidth();
+        int bitmapHeight = bitmap.getHeight();
+
+        // The width and height default to the rest of the image after the x and y offset.
+        int width = (sourceWidth > 0) ? sourceWidth : bitmapWidth - sourceX;
+        int height = (sourceHeight > 0) ? sourceHeight : bitmapHeight - sourceY;
+
+        if (sourceX == 0 && sourceY == 0 && width == bitmapWidth && height == bitmapHeight) {
+            return bitmap;
+        }
+
+        if (sourceX < 0 || sourceY < 0 || width < 1 || height < 1 ||
+            sourceX + width > bitmapWidth || sourceY + height > bitmapHeight) {
+            Logger.logError(client, LOG_TAG, "Crop bitmap for" +
+                " terminal bitmap " + bitmapNum + " failed: The source rectangle" +
+                " " + sourceX + "," + sourceY + " " + width + "x" + height +
+                " is not within the bitmap dimensions " + bitmapWidth + "x" + bitmapHeight);
+            return null;
+        }
+
+        try {
+            return Bitmap.createBitmap(bitmap, sourceX, sourceY, width, height);
+        } catch (Throwable t) {
+            if (t instanceof OutOfMemoryError) System.gc();
+            Logger.logError(client, LOG_TAG, "Crop bitmap for" +
+                " terminal bitmap " + bitmapNum + " to source rectangle" +
+                " " + sourceX + "," + sourceY + " " + width + "x" + height + " failed: " + t.getMessage());
+            return null;
+        }
+    }
+
+    /** Whether a bitmap of the dimensions can be drawn as per {@link #MAX_BITMAP_SIZE}. */
+    private static boolean isBitmapSizeValid(TerminalSessionClient client, int bitmapNum, int bitmapWidth, int bitmapHeight) {
+        long bitmapSize = (long) bitmapWidth * bitmapHeight * 4;
+        if (bitmapSize > MAX_BITMAP_SIZE) {
+            Logger.logError(client, LOG_TAG,
+                "The bitmap for terminal bitmap " + bitmapNum + " with" +
+                    " dimensions " + bitmapWidth + "x" + bitmapHeight +
+                    " has size " + bitmapSize + " greater than max bitmap size " + MAX_BITMAP_SIZE);
+            return false;
+        }
+        return true;
+    }
+
+    /**
+     * Create an {@link Bitmap.Config#ARGB_8888} {@link Bitmap} from raw `RGB` or `RGBA` pixel data
+     * of a kitty graphics image. The alpha channel is expected to not be premultiplied.
+     */
+    private static Bitmap createBitmapFromRawPixels(TerminalSessionClient client, int bitmapNum, byte[] pixels,
+                                                    int bytesPerPixel, int pixelWidth, int pixelHeight) {
+        if (bytesPerPixel < 3 || pixelWidth < 1 || pixelHeight < 1 ||
+            pixels.length != pixelWidth * pixelHeight * bytesPerPixel) {
+            Logger.logError(client, LOG_TAG, "Create bitmap for" +
+                " terminal bitmap " + bitmapNum + " from raw pixels failed:" +
+                " Pixel data of length " + pixels.length +
+                " does not match dimensions " + pixelWidth + "x" + pixelHeight +
+                " with " + bytesPerPixel + " bytes per pixel");
+            return null;
+        }
+
+        if (!isBitmapSizeValid(client, bitmapNum, pixelWidth, pixelHeight)) {
+            return null;
+        }
+
+        try {
+            int[] colors = new int[pixelWidth * pixelHeight];
+            for (int i = 0; i < colors.length; i++) {
+                int offset = i * bytesPerPixel;
+                int red = pixels[offset] & 0xff;
+                int green = pixels[offset + 1] & 0xff;
+                int blue = pixels[offset + 2] & 0xff;
+                int alpha = (bytesPerPixel > 3) ? (pixels[offset + 3] & 0xff) : 0xff;
+                colors[i] = (alpha << 24) | (red << 16) | (green << 8) | blue;
+            }
+
+            return Bitmap.createBitmap(colors, pixelWidth, pixelHeight, Bitmap.Config.ARGB_8888);
+        } catch (Throwable t) {
+            if (t instanceof OutOfMemoryError) System.gc();
+            Logger.logError(client, LOG_TAG, "Create bitmap for" +
+                " terminal bitmap " + bitmapNum + " from raw pixels with" +
+                " dimensions " + pixelWidth + "x" + pixelHeight + " failed: " + t.getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * Get the size to scale an image to so that it is displayed in the requested `width` and
+     * `height` in pixels, where a value `<= 0` means that the respective dimension of the image
+     * itself should be used.
+     *
+     * @return Returns an array with the new width as the first value and the new height as the
+     * second value.
+     */
+    private static int[] getScaledImageSize(int imageWidth, int imageHeight,
+                                            int width, int height, boolean shouldPreserveAspectRatio) {
+        int newWidth = width;
+        int newHeight = height;
+
+        if (shouldPreserveAspectRatio) {
+            double wFactor = 9999.0;
+            double hFactor = 9999.0;
+            if (width > 0) {
+                wFactor = (double) width / imageWidth;
+            }
+            if (height > 0) {
+                hFactor = (double) height / imageHeight;
+            }
+            double factor = Math.min(wFactor, hFactor);
+            newWidth = (int) (factor * imageWidth);
+            newHeight = (int) (factor * imageHeight);
+        } else {
+            if (height <= 0) {
+                newHeight = imageHeight;
+            }
+            if (width <= 0) {
+                newWidth = imageWidth;
+            }
+        }
+
+        return new int[] {newWidth, newHeight};
+    }
+
+
     /** Build a {@link TerminalBitmap} from a {@link Bitmap}. */
     public static TerminalBitmap build(TerminalBuffer terminalBuffer, int bitmapNum, Bitmap bitmap,
                                        int x, int y, int cellWidth, int cellHeight) {
@@ -363,15 +691,30 @@ public class TerminalBitmap {
         int height = (bitmapHeight + cellHeight - 1) / cellHeight;
         int s = 0;
 
+        // The bitmaps of the cells that are overwritten by this bitmap may no longer be referenced by
+        // any cell afterwards, in which case they must be released, otherwise a client that displays
+        // a new image at the same position for every frame would keep all of them in memory.
+        Set<Integer> overwrittenBitmapNums = null;
+
         for (int i = 0; i < height; i++) {
             if (y + i - s == terminalBuffer.mScreenRows) {
                 terminalBuffer.scrollDownOneLine(0, terminalBuffer.mScreenRows, TextStyle.NORMAL);
                 s++;
             }
             for (int j = 0; j < width ; j++) {
-                terminalBuffer.setChar(x + j, y + i - s, '+', TextStyle.encodeTerminalBitmap(bitmapNum, j, i));
+                int row = y + i - s;
+
+                int overwrittenBitmapNum = TextStyle.getTerminalBitmapNum(terminalBuffer.getStyleAt(row, x + j));
+                if (overwrittenBitmapNum >= TerminalBuffer.TERMINAL_BITMAP__NUM_START && overwrittenBitmapNum != bitmapNum) {
+                    if (overwrittenBitmapNums == null) overwrittenBitmapNums = new HashSet<>();
+                    overwrittenBitmapNums.add(overwrittenBitmapNum);
+                }
+
+                terminalBuffer.setChar(x + j, row, '+', TextStyle.encodeTerminalBitmap(bitmapNum, j, i));
             }
         }
+
+        terminalBuffer.releaseUnreferencedTerminalBitmaps(overwrittenBitmapNums);
 
         if (width * cellWidth < bitmapWidth) {
             bitmap = Bitmap.createBitmap(bitmap, 0, 0, width * cellWidth, bitmapHeight);
@@ -419,6 +762,26 @@ public class TerminalBitmap {
 
     public void setCursorDelta(int[] cursorDelta) {
         mCursorDelta = cursorDelta;
+    }
+
+
+    public boolean isKittyImage() {
+        return mIsKittyImage;
+    }
+
+    public long getKittyImageId() {
+        return mKittyImageId;
+    }
+
+    public long getKittyPlacementId() {
+        return mKittyPlacementId;
+    }
+
+    /** Mark this bitmap as a placement of a kitty graphics image. */
+    public void setKittyImage(long kittyImageId, long kittyPlacementId) {
+        mIsKittyImage = true;
+        mKittyImageId = kittyImageId;
+        mKittyPlacementId = kittyPlacementId;
     }
 
 
